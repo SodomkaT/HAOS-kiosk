@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.3-sodomkat.4 - November 2026
+
+- Disable Chromium's horizontal overscroll history navigation so page-level
+  swipe gestures no longer trigger browser Back or Forward navigation.
+
 ## v1.3.3-sodomkat.3 - November 2026
 
 - Map libinput and explicit evdev touch devices such as `evdev-event4` to the
