@@ -3,7 +3,7 @@
 ################################################################################
 # Add-on: HAOS Kiosk Display (haoskiosk)
 # File: run.sh
-# Version: 1.3.3-sodomkat.2
+# Version: 1.3.3-sodomkat.3
 # Copyright Jeff Kosowsky
 # Date: February 2026
 #
@@ -602,30 +602,17 @@ if [ "$MAP_TOUCH_INPUTS" = true ]; then  # Map touch devices to physical output 
             continue
         fi
 
-        # map-to-output supplies scale/translation for the selected CRTC but
-        # does not rotate absolute coordinates for all X11 driver paths. Read
-        # that mapping back and compose it with the configured display rotation.
+        # xinput derives both the selected CRTC mapping and its active xrandr
+        # rotation. Do not rotate this matrix again: composing the same 90-degree
+        # rotation twice turns a left/right display into a 180-degree touch map.
         props="$(xinput list-props "$id" 2>/dev/null)"
-        output_matrix="$(touch_extract_ctm "$props" 2>/dev/null || true)"
-        rotation_matrix="$(touch_rotation_matrix "$ROTATE_DISPLAY" 2>/dev/null || true)"
-        final_matrix="$(touch_multiply_matrices "$output_matrix" "$rotation_matrix" 2>/dev/null || true)"
-
-        if [[ -z "$output_matrix" || -z "$rotation_matrix" || -z "$final_matrix" ]]; then
-            bashio::log.warning "Could not build transformation matrix for touch input [$id|$name]"
-            TOUCH_INPUTS_FAILED=$((TOUCH_INPUTS_FAILED + 1))
-            continue
-        fi
-
-        read -r -a final_matrix_values <<< "$final_matrix"
-        if xinput set-prop "$id" "Coordinate Transformation Matrix" "${final_matrix_values[@]}"; then
-            applied_props="$(xinput list-props "$id" 2>/dev/null)"
-            applied_matrix="$(touch_extract_ctm "$applied_props" 2>/dev/null || echo "$final_matrix")"
+        applied_matrix="$(touch_extract_ctm "$props" 2>/dev/null || true)"
+        if [[ -n "$applied_matrix" ]]; then
             bashio::log.info "Mapped touch input [$id|$name] driver=$driver${device_node:+ node=$device_node} (detected by $touch_reason) --> $OUTPUT_NAME; rotation=$ROTATE_DISPLAY; matrix=[$applied_matrix] [SUCCESS]"
-            TOUCH_INPUTS_MAPPED=$((TOUCH_INPUTS_MAPPED + 1))
         else
-            bashio::log.warning "Failed to apply rotation=$ROTATE_DISPLAY matrix=[$final_matrix] to touch input [$id|$name] on $OUTPUT_NAME"
-            TOUCH_INPUTS_FAILED=$((TOUCH_INPUTS_FAILED + 1))
+            bashio::log.info "Mapped touch input [$id|$name] driver=$driver${device_node:+ node=$device_node} (detected by $touch_reason) --> $OUTPUT_NAME; rotation=$ROTATE_DISPLAY [SUCCESS]"
         fi
+        TOUCH_INPUTS_MAPPED=$((TOUCH_INPUTS_MAPPED + 1))
 
     done < <(xinput list --id-only | sort -n)
 

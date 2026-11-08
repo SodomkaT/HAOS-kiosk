@@ -37,18 +37,13 @@ assert_failure() {
     fi
 }
 
-assert_equal "1 0 0 0 1 0 0 0 1" "$(touch_rotation_matrix normal)" "normal matrix"
-assert_equal "0 -1 1 1 0 0 0 0 1" "$(touch_rotation_matrix left)" "left matrix"
-assert_equal "0 1 0 -1 0 1 0 0 1" "$(touch_rotation_matrix right)" "right matrix"
-assert_equal "-1 0 1 0 -1 1 0 0 1" "$(touch_rotation_matrix inverted)" "inverted matrix"
-
-mapped="0.5 0 0.5 0 0.5 0 0 0 1"
-rotated="$(touch_multiply_matrices "$mapped" "$(touch_rotation_matrix left)")"
-assert_equal "0 -0.5 1 0.5 0 0 0 0 1" "$rotated" "output mapping composed with left rotation"
-
 properties='Coordinate Transformation Matrix (142): 1.000000, 0.000000, 0.000000, 0.000000, 1.000000, 0.000000, 0.000000, 0.000000, 1.000000'
 assert_equal "1.000000 0.000000 0.000000 0.000000 1.000000 0.000000 0.000000 0.000000 1.000000" \
     "$(touch_extract_ctm "$properties")" "CTM parsing"
+
+left_properties='Coordinate Transformation Matrix (142): 0.000000, -1.000000, 1.000000, 1.000000, 0.000000, 0.000000, 0.000000, 0.000000, 1.000000'
+assert_equal "0.000000 -1.000000 1.000000 1.000000 0.000000 0.000000 0.000000 0.000000 1.000000" \
+    "$(touch_extract_ctm "$left_properties")" "xinput left-output matrix remains unchanged"
 
 node_properties='libinput Device Node (300): "/dev/input/event7"'
 assert_equal "/dev/input/event7" "$(touch_device_node "generic device" "$node_properties")" "libinput node property"

@@ -1,41 +1,5 @@
 #!/usr/bin/env bash
-# Helpers for detecting X11 touch devices and composing their coordinate matrix.
-
-touch_rotation_matrix() {
-    case "$1" in
-        normal) echo "1 0 0 0 1 0 0 0 1" ;;
-        left) echo "0 -1 1 1 0 0 0 0 1" ;;
-        right) echo "0 1 0 -1 0 1 0 0 1" ;;
-        inverted) echo "-1 0 1 0 -1 1 0 0 1" ;;
-        *) return 1 ;;
-    esac
-}
-
-# Multiply two row-major 3x3 matrices. XInput applies the result to column
-# vectors, so output mapping must be the left-hand matrix and rotation the
-# right-hand matrix.
-touch_multiply_matrices() {
-    awk -v left="$1" -v right="$2" '
-        function clean(value) {
-            return (value < 0.000000000001 && value > -0.000000000001) ? 0 : value
-        }
-        BEGIN {
-            if (split(left, a, /[[:space:]]+/) != 9 ||
-                split(right, b, /[[:space:]]+/) != 9)
-                exit 1
-
-            for (row = 0; row < 3; row++) {
-                for (column = 0; column < 3; column++) {
-                    value = 0
-                    for (item = 0; item < 3; item++)
-                        value += a[row * 3 + item + 1] * b[item * 3 + column + 1]
-                    printf "%s%.10g", (row || column ? " " : ""), clean(value)
-                }
-            }
-            print ""
-        }
-    '
-}
+# Helpers for detecting X11 touch devices and inspecting their coordinate matrix.
 
 touch_extract_ctm() {
     awk -F: '

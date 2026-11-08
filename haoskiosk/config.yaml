@@ -4,7 +4,7 @@ url: "https://github.com/SodomkaT/HAOS-kiosk"
 description: |
   Chromium-focused fork of the original HAOS Kiosk Display by
   Jeff Kosowsky for local HAOS dashboard screens and touch displays.
-version: "1.3.3-sodomkat.2"
+version: "1.3.3-sodomkat.3"
 slug: "haoskiosk"
 
 arch:
