@@ -92,7 +92,7 @@ COPY xorg.conf.default /etc/X11/
 COPY userconf.lua /root/.config/luakit/
 COPY translations/*.yaml /translations/
 
-COPY run.sh /
+COPY run.sh touch_mapping.sh /
 RUN chmod a+x /run.sh
 
 COPY mouse_touch_inputs.py gesture_commands.json /
