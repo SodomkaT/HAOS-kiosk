@@ -98,7 +98,7 @@ load_config_var() {
     local DEFAULT="${2:-}"
     local MASK="${3:-}"
 
-    local VALUE
+    local VALUE=""
     #Check if $VAR_NAME exists before getting its value since 'set +x' mode
     if declare -p "$VAR_NAME" >/dev/null 2>&1; then  #Variable exist, get its value
         VALUE="${!VAR_NAME}"
@@ -810,16 +810,24 @@ if [ "$DEBUG_MODE" != true ]; then
     BROWSER_PID=$!
     bashio::log.info "Launching $BROWSER browser(PID=$BROWSER_PID): $TARGET_URL"
 
-    # Determine process search pattern: on Alpine, chromium-browser is a wrapper
-    # script that execs /usr/lib/chromium/chromium, so pgrep must match broadly
+    # Match Chromium by process name so the login helper cannot keep this loop alive.
     case "$BROWSER_ENGINE" in
-        chromium) BROWSER_PGREP="chromium" ;;
-        *)        BROWSER_PGREP="$BROWSER" ;;
+        chromium)
+            BROWSER_PGREP="chromium"
+            BROWSER_PGREP_MATCH="-x"
+            if [ -n "$HA_USERNAME" ] && [ -n "$HA_PASSWORD" ]; then
+                python3 -u /chromium_watchdog.py &
+            fi
+            ;;
+        *)
+            BROWSER_PGREP="$BROWSER"
+            BROWSER_PGREP_MATCH="-f"
+            ;;
     esac
 
     count=0
     while true; do  # Wait for all browser processes to exit
-        if pgrep -f "$BROWSER_PGREP" > /dev/null 2>&1; then
+        if pgrep "$BROWSER_PGREP_MATCH" "$BROWSER_PGREP" > /dev/null 2>&1; then
             count=0
         else
             count=$((count + 1))

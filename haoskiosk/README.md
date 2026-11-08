@@ -81,8 +81,10 @@ ______________________________________________________________________
 2. Click on the Add-on, press **Install** and wait until the Add-on is
    installed.
 
-3. Optionally enter your HA username and password in the **Configuration**
-   tab if you want the add-on to auto-submit the HA login form.
+3. To enable Chromium auto-login, enter both your HA username and password in the
+   **Configuration** tab. Chromium uses the HA login form when a session is
+   needed, including after a reboot. It retries if HA is temporarily unavailable.
+   Leave either field empty to sign in manually. Complete any MFA prompt manually.
 
 4. Press **Start** to run the Add-on.
 

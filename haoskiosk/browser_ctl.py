@@ -106,10 +106,11 @@ class ChromiumController:
         )
         return page_targets[0]
 
-    async def _with_page(
+    async def with_page(
         self,
         worker: Callable[[ChromiumPageSession, dict[str, Any]], Awaitable[Any]],
     ) -> Any:
+        """Run a sequence of CDP commands on the active page."""
         async with ClientSession(timeout=self._timeout) as session:
             async with session.get(self._json_list_url) as response:
                 response.raise_for_status()
@@ -147,7 +148,7 @@ class ChromiumController:
         async def worker(page: ChromiumPageSession, _: dict[str, Any]) -> dict[str, Any]:
             return await page.call("Page.navigate", {"url": normalized})
 
-        return await self._with_page(worker)
+        return await self.with_page(worker)
 
     async def reload(self, *, ignore_cache: bool = False) -> dict[str, Any]:
         """Reload the active page."""
@@ -155,7 +156,7 @@ class ChromiumController:
         async def worker(page: ChromiumPageSession, _: dict[str, Any]) -> dict[str, Any]:
             return await page.call("Page.reload", {"ignoreCache": ignore_cache})
 
-        return await self._with_page(worker)
+        return await self.with_page(worker)
 
     async def go_back(self) -> dict[str, Any]:
         """Move one step back in navigation history."""
@@ -169,7 +170,7 @@ class ChromiumController:
             entry_id = entries[current_index - 1]["id"]
             return await page.call("Page.navigateToHistoryEntry", {"entryId": entry_id})
 
-        return await self._with_page(worker)
+        return await self.with_page(worker)
 
     async def go_forward(self) -> dict[str, Any]:
         """Move one step forward in navigation history."""
@@ -183,7 +184,7 @@ class ChromiumController:
             entry_id = entries[current_index + 1]["id"]
             return await page.call("Page.navigateToHistoryEntry", {"entryId": entry_id})
 
-        return await self._with_page(worker)
+        return await self.with_page(worker)
 
     async def evaluate(
         self,
@@ -204,7 +205,7 @@ class ChromiumController:
                 },
             )
 
-        return await self._with_page(worker)
+        return await self.with_page(worker)
 
 
 async def run_browser_action(action: str, url: str | None = None) -> dict[str, Any]:

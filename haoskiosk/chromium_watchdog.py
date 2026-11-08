@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Chromium kiosk watchdog.
-
-Handles the HA-specific browser behavior previously implemented in Luakit:
-auto-login, persistent kiosk browser id, HA theme/sidebar storage, and timed
-reloads. This keeps the Chromium runtime thin while preserving the HA-focused
-workflow expected by the add-on.
-"""
+"""Keep Chromium signed in through Home Assistant's own login form."""
 
 from __future__ import annotations
 
@@ -13,226 +7,152 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
-from typing import Any
+from urllib.parse import urlsplit
 
-from browser_ctl import ChromiumController
+from browser_ctl import ChromiumController, ChromiumPageSession
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s: [%(filename)s:%(funcName)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger(__name__)
+POLL_INTERVAL = 2
+RELOAD_INTERVAL = 15
+SUBMIT_INTERVAL = 60
 
-HA_URL = (os.getenv("HA_URL") or "http://localhost:8123").rstrip("/")
-HA_URL_BASE = re.match(r"^(https?://[\w.\-]+(?::\d+)?)", HA_URL)
-HA_URL_BASE = HA_URL_BASE.group(1).rstrip("/") if HA_URL_BASE else HA_URL
-HA_USERNAME = os.getenv("HA_USERNAME") or ""
-HA_PASSWORD = os.getenv("HA_PASSWORD") or ""
-RAW_AUTO_LOGIN = (os.getenv("HA_AUTO_LOGIN") or "").strip().lower()
-if RAW_AUTO_LOGIN in {"1", "true", "yes", "on"}:
-    HA_AUTO_LOGIN = True
-elif RAW_AUTO_LOGIN in {"0", "false", "no", "off"}:
-    HA_AUTO_LOGIN = False
-else:
-    HA_AUTO_LOGIN = bool(HA_USERNAME and HA_PASSWORD)
-LOGIN_DELAY_MS = int(float(os.getenv("LOGIN_DELAY") or "1") * 1000)
-BROWSER_REFRESH = max(0, int(os.getenv("BROWSER_REFRESH") or "0"))
-DARK_MODE = (os.getenv("DARK_MODE") or "true").strip().lower() == "true"
-RAW_SIDEBAR = (os.getenv("HA_SIDEBAR") or "").strip().lower()
-RAW_THEME = (os.getenv("HA_THEME") or "").strip()
-POLL_INTERVAL = 2.0
-HARD_RELOAD_FREQ = 10
+CHECK_PAGE = """
+(expectedUrl, credentials) => {
+  if (location.href !== expectedUrl) return;
+  if (performance.getEntriesByType("navigation")[0]?.responseStatus >= 500) {
+    return "unavailable";
+  }
+  if (location.pathname !== "/auth/authorize") return;
 
-SIDEBAR_MAP = {
-    "full": "",
-    "none": '"always_hidden"',
-    "narrow": '"auto"',
-    "": "",
+  const query = new URLSearchParams(location.search);
+  if (query.get("response_type") !== "code" ||
+      query.get("client_id") !== location.origin + "/" ||
+      new URL(query.get("redirect_uri") || "about:blank").origin !== location.origin) {
+    return;
+  }
+
+  const authorize = document.querySelector("ha-authorize");
+  const form = authorize?.querySelector("ha-auth-flow form");
+  if (authorize?.querySelector('ha-alert[alert-type="error"]')) {
+    // A failed request can leave HA on a login page that cannot recover by itself.
+    // Leave authentication errors (including a banned client) visible for manual use.
+    const request = performance.getEntriesByType("resource").findLast(entry =>
+      entry.name === location.origin + "/auth/providers" ||
+      entry.name.startsWith(location.origin + "/auth/login_flow")
+    );
+    if (!request || request.responseStatus === 0 || request.responseStatus >= 500) {
+      return "unavailable";
+    }
+  }
+  if (!credentials || !form) return;
+  if (document.documentElement.hasAttribute("data-haos-kiosk-login-attempted")) {
+    return "submitted";
+  }
+
+  const username = form.querySelector('input[autocomplete="username"]');
+  const password = form.querySelector('input[autocomplete="current-password"][type="password"]');
+  const submit = form.querySelector(".action ha-button");
+  if (!username || !password || !submit || username.disabled || password.disabled ||
+      submit.disabled || submit.loading) return;
+
+  username.value = credentials[0];
+  password.value = credentials[1];
+  username.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  password.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  const remember = form.querySelector("ha-checkbox");
+  if (remember) {
+    remember.checked = true;
+    remember.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  document.documentElement.setAttribute("data-haos-kiosk-login-attempted", "");
+  submit.click();
+  return "submitted";
 }
-
-
-def normalize_sidebar(raw_sidebar: str) -> str:
-    """Return the HA localStorage representation for dockedSidebar."""
-    return SIDEBAR_MAP.get(raw_sidebar, "")
-
-
-def normalize_theme(raw_theme: str, dark_mode: bool) -> str:
-    """Return the HA localStorage representation for selectedTheme."""
-    theme = raw_theme.strip()
-    if theme in {"", "{}", "Home Assistant"}:
-        return '{"dark":true}' if dark_mode else '{"dark":false}'
-    if theme[0] not in {'"', "'", "{"}:
-        return json.dumps(theme)
-    return theme
-
-
-def build_auto_login_script() -> str:
-    """Return JS that fills HA auth fields and submits the form."""
-    return f"""
-(() => {{
-  const username = {json.dumps(HA_USERNAME)};
-  const password = {json.dumps(HA_PASSWORD)};
-  const delayMs = {LOGIN_DELAY_MS};
-  window.setTimeout(() => {{
-    try {{
-      const usernameField = document.querySelector('input[autocomplete="username"]');
-      const passwordField = document.querySelector('input[autocomplete="current-password"]');
-      const checkbox = document.querySelector('ha-checkbox');
-      const submitButton = document.querySelector('ha-button, mwc-button');
-      if (!usernameField || !passwordField || !submitButton) {{
-        return {{ ok: false, reason: 'missing-elements' }};
-      }}
-      usernameField.value = username;
-      usernameField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-      passwordField.value = password;
-      passwordField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-      if (checkbox) {{
-        checkbox.setAttribute('checked', '');
-        checkbox.dispatchEvent(new Event('change', {{ bubbles: true }}));
-      }}
-      submitButton.click();
-      return {{ ok: true }};
-    }} catch (error) {{
-      return {{ ok: false, reason: String(error) }};
-    }}
-  }}, delayMs);
-}})();
 """
 
 
-def build_settings_script(sidebar: str, theme: str) -> str:
-    """Return JS that applies HA localStorage settings."""
-    return f"""
-(() => {{
-  try {{
-    let changed = false;
-    localStorage.setItem('browser_mod-browser-id', 'haos_kiosk');
-
-    const sidebar = {json.dumps(sidebar)};
-    const currentSidebar = localStorage.getItem('dockedSidebar') || '';
-    if (sidebar !== currentSidebar) {{
-      if (sidebar) {{
-        localStorage.setItem('dockedSidebar', sidebar);
-      }} else {{
-        localStorage.removeItem('dockedSidebar');
-      }}
-      changed = true;
-    }}
-
-    const theme = {json.dumps(theme)};
-    const currentTheme = localStorage.getItem('selectedTheme') || '';
-    if (theme !== currentTheme) {{
-      if (theme) {{
-        localStorage.setItem('selectedTheme', theme);
-      }} else {{
-        localStorage.removeItem('selectedTheme');
-      }}
-      changed = true;
-    }}
-
-    return {{
-      ok: true,
-      changed,
-      sidebar: localStorage.getItem('dockedSidebar') || '',
-      theme: localStorage.getItem('selectedTheme') || '',
-    }};
-  }} catch (error) {{
-    return {{ ok: false, changed: false, error: String(error) }};
-  }}
-}})();
-"""
-
-
-def is_auth_page(url: str) -> bool:
-    """Return True if URL looks like HA auth page."""
-    return bool(re.match(rf"^{re.escape(HA_URL_BASE)}/auth/authorize\?response_type=code", url))
-
-
-def is_ha_page(url: str) -> bool:
-    """Return True if URL belongs to the current HA instance."""
-    return bool(url and (url + "/").startswith(HA_URL_BASE + "/"))
-
-
-def extract_evaluate_value(result: dict[str, Any]) -> Any:
-    """Unwrap Runtime.evaluate returnByValue payload."""
-    runtime_result = result.get("result")
-    if isinstance(runtime_result, dict) and "value" in runtime_result:
-        return runtime_result["value"]
-    return runtime_result
+def origin(url: str) -> tuple[str, str | None, int | None]:
+    """Compare origins with explicit and implicit default ports treated alike."""
+    parts = urlsplit(url)
+    default_port = {"http": 80, "https": 443}.get(parts.scheme)
+    return parts.scheme, parts.hostname, parts.port or default_port
 
 
 async def main() -> None:
-    """Start watchdog loop."""
+    username = os.getenv("HA_USERNAME")
+    password = os.getenv("HA_PASSWORD")
+    if not username or not password:
+        return
+
+    ha_origin = origin(os.getenv("HA_URL") or "http://localhost:8123")
+    login_delay = float(os.getenv("LOGIN_DELAY") or "1")
     controller = ChromiumController()
-    sidebar = normalize_sidebar(RAW_SIDEBAR)
-    theme = normalize_theme(RAW_THEME, DARK_MODE)
-    auto_login_script = build_auto_login_script()
-    settings_script = build_settings_script(sidebar, theme)
+    current_document = ""
+    document_seen_at = 0.0
+    submitted_document = ""
+    next_submit_at = 0.0
+    next_reload_at = 0.0
 
-    logger.info(
-        "Chromium watchdog started: HA_URL=%s LOGIN_DELAY=%.1fs REFRESH=%ss SIDEBAR=%s THEME=%s AUTO_LOGIN=%s",
-        HA_URL,
-        LOGIN_DELAY_MS / 1000,
-        BROWSER_REFRESH,
-        sidebar,
-        theme,
-        HA_AUTO_LOGIN,
-    )
+    async def check_page(page: ChromiumPageSession, target: dict) -> None:
+        nonlocal current_document, document_seen_at, submitted_document
+        nonlocal next_submit_at, next_reload_at
 
-    last_url = ""
-    last_auth_url = ""
-    last_settings_url = ""
-    last_reload_at = time.monotonic()
-    reload_count = 0
+        target_url = target.get("url", "")
+        if not target_url.startswith("chrome-error:") and origin(target_url) != ha_origin:
+            return
 
+        frame = (await page.call("Page.getFrameTree"))["frameTree"]["frame"]
+        unreachable_url = frame.get("unreachableUrl")
+        url = unreachable_url or (frame["url"] + frame.get("urlFragment", ""))
+        if origin(url) != ha_origin:
+            return
+
+        loader_id = frame["loaderId"]
+        now = time.monotonic()
+        if loader_id != current_document:
+            current_document = loader_id
+            document_seen_at = now
+
+        if unreachable_url:
+            status = "unavailable"
+        else:
+            credentials = None
+            if (urlsplit(url).path == "/auth/authorize"
+                    and loader_id != submitted_document
+                    and now >= next_submit_at
+                    and now - document_seen_at >= login_delay):
+                credentials = (username, password)
+
+            # The script checks the current URL again in case navigation raced CDP.
+            # Never report evaluation exceptions or echo the command payload.
+            result = await page.call("Runtime.evaluate", {
+                "expression": f"({CHECK_PAGE})({json.dumps(url)}, {json.dumps(credentials)})",
+                "returnByValue": True,
+                "silent": True,
+            })
+            status = result.get("result", {}).get("value")
+
+        if status == "submitted":
+            submitted_document = loader_id
+            next_submit_at = now + SUBMIT_INTERVAL
+            logger.info("Submitted the Home Assistant login form")
+        elif status == "unavailable" and now >= next_reload_at:
+            next_reload_at = now + RELOAD_INTERVAL
+            await page.call("Page.reload", {"loaderId": loader_id, "ignoreCache": True})
+
+    logger.info("Chromium automatic login enabled")
     while True:
         try:
-            target = await controller.get_page_target()
-            url = str(target.get("url") or "")
-            if url and url != last_url:
-                logger.info("URL: %s", url)
-                last_url = url
-
-            if HA_AUTO_LOGIN and url and is_auth_page(url) and url != last_auth_url:
-                await controller.evaluate(auto_login_script)
-                last_auth_url = url
-                logger.info("Triggered HA auto-login for %s", url)
-
-            if url and is_ha_page(url) and not is_auth_page(url) and url != last_settings_url:
-                result = extract_evaluate_value(await controller.evaluate(settings_script))
-                if isinstance(result, dict) and result.get("ok"):
-                    logger.info(
-                        "Applied HA settings: sidebar=%s theme=%s changed=%s",
-                        result.get("sidebar"),
-                        result.get("theme"),
-                        result.get("changed"),
-                    )
-                    if result.get("changed"):
-                        await controller.reload(ignore_cache=False)
-                        last_reload_at = time.monotonic()
-                        logger.info("Reloaded page to apply updated HA localStorage")
-                else:
-                    logger.warning("Failed to apply HA settings: %s", result)
-                last_settings_url = url
-
-            if BROWSER_REFRESH > 0 and url and url != "about:blank":
-                now = time.monotonic()
-                if now - last_reload_at >= BROWSER_REFRESH:
-                    reload_count += 1
-                    ignore_cache = reload_count % HARD_RELOAD_FREQ == 0
-                    await controller.reload(ignore_cache=ignore_cache)
-                    last_reload_at = now
-                    logger.info("Reloading%s: %s", " [HARD]" if ignore_cache else "", url)
-
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("Watchdog loop error: %s", exc)
-
+            await asyncio.wait_for(controller.with_page(check_page), timeout=8)
+        except Exception:
+            # Chromium may still be starting, navigating, or suspending its renderer.
+            # CDP errors can contain request data, so only report a fixed message.
+            logger.debug("Chromium page temporarily unavailable")
         await asyncio.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="[Chromium auto-login] %(message)s")
     asyncio.run(main())
